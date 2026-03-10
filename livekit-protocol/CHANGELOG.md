@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.7.1](https://github.com/livekit/rust-sdks/compare/rust-sdks/livekit-protocol@0.7.0...rust-sdks/livekit-protocol@0.7.1) - 2026-02-16
+
+### Other
+
+- update Cargo.toml dependencies
+
+## [0.7.0](https://github.com/livekit/rust-sdks/compare/rust-sdks/livekit-protocol@0.6.0...rust-sdks/livekit-protocol@0.7.0) - 2026-02-09
+
+### Other
+
+- update proto & fix CI ([#871](https://github.com/livekit/rust-sdks/pull/871))
+- add can_manage_agent_session permission ([#870](https://github.com/livekit/rust-sdks/pull/870))
+- Use workspace dependencies & settings ([#856](https://github.com/livekit/rust-sdks/pull/856))
+- Upgrade protocol to v1.44.0 ([#857](https://github.com/livekit/rust-sdks/pull/857))
+
+## [0.6.0](https://github.com/livekit/rust-sdks/compare/rust-sdks/livekit-protocol@0.5.2...rust-sdks/livekit-protocol@0.6.0) - 2025-12-04
+
+### Added
+
+- *(connector)* initial service impl ([#790](https://github.com/livekit/rust-sdks/pull/790))
+
+## [0.5.2](https://github.com/livekit/rust-sdks/compare/rust-sdks/livekit-protocol@0.5.1...rust-sdks/livekit-protocol@0.5.2) - 2025-11-20
+
+### Other
+
+- Remove unused dependencies ([#761](https://github.com/livekit/rust-sdks/pull/761))
+
 ## [0.5.1](https://github.com/livekit/rust-sdks/compare/rust-sdks/livekit-protocol@0.5.0...rust-sdks/livekit-protocol@0.5.1) - 2025-10-22
 
 ### Other

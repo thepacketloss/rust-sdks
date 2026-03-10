@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.13](https://github.com/livekit/rust-sdks/compare/rust-sdks/webrtc-sys-build@0.3.12...rust-sdks/webrtc-sys-build@0.3.13) - 2026-02-09
+
+### Other
+
+- Use workspace dependencies & settings ([#856](https://github.com/livekit/rust-sdks/pull/856))
+- Use the correct download url in webrtc-sys build. ([#825](https://github.com/livekit/rust-sdks/pull/825))
+
+## [0.3.12](https://github.com/livekit/rust-sdks/compare/rust-sdks/webrtc-sys-build@0.3.11...rust-sdks/webrtc-sys-build@0.3.12) - 2025-12-04
+
+### Other
+
+- Expose desktop capturer ([#725](https://github.com/livekit/rust-sdks/pull/725))
+
 ## [0.3.11](https://github.com/livekit/rust-sdks/compare/rust-sdks/webrtc-sys-build@0.3.10...rust-sdks/webrtc-sys-build@0.3.11) - 2025-10-27
 
 ### Fixed

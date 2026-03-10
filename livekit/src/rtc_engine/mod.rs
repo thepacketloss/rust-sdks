@@ -80,6 +80,8 @@ pub struct EngineOptions {
     pub rtc_config: RtcConfiguration,
     pub signal_options: SignalOptions,
     pub join_retries: u32,
+    /// Enable single peer connection mode
+    pub single_peer_connection: bool,
 }
 
 #[derive(Debug)]
@@ -184,6 +186,10 @@ pub enum EngineEvent {
     RefreshToken {
         url: String,
         token: String,
+    },
+    TrackMuted {
+        sid: String,
+        muted: bool,
     },
 }
 
@@ -602,6 +608,9 @@ impl EngineInner {
             SessionEvent::RefreshToken { url, token } => {
                 let _ = self.engine_tx.send(EngineEvent::RefreshToken { url, token });
             }
+            SessionEvent::TrackMuted { sid, muted } => {
+                let _ = self.engine_tx.send(EngineEvent::TrackMuted { sid, muted });
+            }
         }
         Ok(())
     }
@@ -656,7 +665,12 @@ impl EngineInner {
             // If we're already reconnecting just update the interval to restart a new attempt
             // ASAP
 
-            running_handle.full_reconnect = full_reconnect;
+            // Only escalate to full reconnect, never downgrade. Stale signal-close
+            // events (which request resume) must not override a full reconnect decision
+            // made by the reconnect loop after a failed resume attempt.
+            if full_reconnect {
+                running_handle.full_reconnect = true;
+            }
 
             if retry_now {
                 let inner = self.clone();
@@ -766,10 +780,8 @@ impl EngineInner {
                 log::error!("resuming connection... attempt: {}", i);
                 if let Err(err) = self.try_resume_connection().await {
                     log::error!("resuming connection failed: {}", err);
-                    if !matches!(err, EngineError::Signal(_)) {
-                        let mut running_handle = self.running_handle.write();
-                        running_handle.full_reconnect = true;
-                    }
+                    let mut running_handle = self.running_handle.write();
+                    running_handle.full_reconnect = true;
                 } else {
                     let (tx, rx) = oneshot::channel();
                     let _ = self.engine_tx.send(EngineEvent::Resumed(tx));
