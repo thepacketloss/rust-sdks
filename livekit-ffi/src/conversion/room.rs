@@ -18,15 +18,34 @@ use livekit::{
         key_provider::{KeyProvider, KeyProviderOptions},
         E2eeOptions, EncryptionType,
     },
-    options::{AudioEncoding, TrackPublishOptions, VideoEncoding},
+    options::{AudioEncoding, PacketTrailerFeatures, TrackPublishOptions, VideoEncoding},
     prelude::*,
     webrtc::{
-        native::frame_cryptor::EncryptionState,
+        native::frame_cryptor::{EncryptionState, KeyDerivationAlgorithm},
         prelude::{ContinualGatheringPolicy, IceServer, IceTransportsType, RtcConfiguration},
     },
     RoomInfo,
 };
 use std::time::Duration;
+
+fn packet_trailer_features_from_proto(features: Vec<i32>) -> PacketTrailerFeatures {
+    let mut packet_trailer_features = PacketTrailerFeatures::default();
+
+    for feature in
+        features.into_iter().filter_map(|value| proto::PacketTrailerFeature::try_from(value).ok())
+    {
+        match feature {
+            proto::PacketTrailerFeature::PtfUserTimestamp => {
+                packet_trailer_features.user_timestamp = true;
+            }
+            proto::PacketTrailerFeature::PtfFrameId => {
+                packet_trailer_features.frame_id = true;
+            }
+        }
+    }
+
+    packet_trailer_features
+}
 
 impl From<EncryptionState> for proto::EncryptionState {
     fn from(value: EncryptionState) -> Self {
@@ -102,16 +121,53 @@ impl From<DisconnectReason> for proto::DisconnectReason {
             DisconnectReason::SipTrunkFailure => Self::SipTrunkFailure,
             DisconnectReason::ConnectionTimeout => Self::ConnectionTimeout,
             DisconnectReason::MediaFailure => Self::MediaFailure,
+            DisconnectReason::AgentError => Self::AgentError,
+        }
+    }
+}
+
+impl From<proto::DisconnectReason> for DisconnectReason {
+    fn from(value: proto::DisconnectReason) -> Self {
+        match value {
+            proto::DisconnectReason::UnknownReason => Self::UnknownReason,
+            proto::DisconnectReason::ClientInitiated => Self::ClientInitiated,
+            proto::DisconnectReason::DuplicateIdentity => Self::DuplicateIdentity,
+            proto::DisconnectReason::ServerShutdown => Self::ServerShutdown,
+            proto::DisconnectReason::ParticipantRemoved => Self::ParticipantRemoved,
+            proto::DisconnectReason::RoomDeleted => Self::RoomDeleted,
+            proto::DisconnectReason::StateMismatch => Self::StateMismatch,
+            proto::DisconnectReason::JoinFailure => Self::JoinFailure,
+            proto::DisconnectReason::Migration => Self::Migration,
+            proto::DisconnectReason::SignalClose => Self::SignalClose,
+            proto::DisconnectReason::RoomClosed => Self::RoomClosed,
+            proto::DisconnectReason::UserUnavailable => Self::UserUnavailable,
+            proto::DisconnectReason::UserRejected => Self::UserRejected,
+            proto::DisconnectReason::SipTrunkFailure => Self::SipTrunkFailure,
+            proto::DisconnectReason::ConnectionTimeout => Self::ConnectionTimeout,
+            proto::DisconnectReason::MediaFailure => Self::MediaFailure,
+            proto::DisconnectReason::AgentError => Self::AgentError,
         }
     }
 }
 
 impl From<proto::KeyProviderOptions> for KeyProviderOptions {
     fn from(value: proto::KeyProviderOptions) -> Self {
+        let key_derivation_algorithm = value.key_derivation_function().into();
         Self {
             ratchet_window_size: value.ratchet_window_size,
             ratchet_salt: value.ratchet_salt,
             failure_tolerance: value.failure_tolerance,
+            key_ring_size: value.key_ring_size,
+            key_derivation_algorithm,
+        }
+    }
+}
+
+impl From<proto::KeyDerivationFunction> for KeyDerivationAlgorithm {
+    fn from(value: proto::KeyDerivationFunction) -> Self {
+        match value {
+            proto::KeyDerivationFunction::Pbkdf2 => KeyDerivationAlgorithm::PBKDF2,
+            proto::KeyDerivationFunction::Hkdf => KeyDerivationAlgorithm::HKDF,
         }
     }
 }
@@ -253,9 +309,13 @@ impl From<proto::TrackPublishOptions> for TrackPublishOptions {
             red: opts.red.unwrap_or(default_publish_options.red),
             simulcast: opts.simulcast.unwrap_or(default_publish_options.simulcast),
             stream: opts.stream.unwrap_or(default_publish_options.stream),
+            simulcast_layers: default_publish_options.simulcast_layers,
             preconnect_buffer: opts
                 .preconnect_buffer
                 .unwrap_or(default_publish_options.preconnect_buffer),
+            packet_trailer_features: packet_trailer_features_from_proto(
+                opts.packet_trailer_features,
+            ),
         }
     }
 }
@@ -269,6 +329,31 @@ impl From<proto::VideoEncoding> for VideoEncoding {
 impl From<proto::AudioEncoding> for AudioEncoding {
     fn from(opts: proto::AudioEncoding) -> Self {
         Self { max_bitrate: opts.max_bitrate }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::packet_trailer_features_from_proto;
+    use crate::proto;
+
+    #[test]
+    fn packet_trailer_features_default_to_empty() {
+        let features = packet_trailer_features_from_proto(Vec::new());
+
+        assert!(!features.user_timestamp);
+        assert!(!features.frame_id);
+    }
+
+    #[test]
+    fn packet_trailer_features_enable_known_flags() {
+        let features = packet_trailer_features_from_proto(vec![
+            proto::PacketTrailerFeature::PtfUserTimestamp.into(),
+            proto::PacketTrailerFeature::PtfFrameId.into(),
+        ]);
+
+        assert!(features.user_timestamp);
+        assert!(features.frame_id);
     }
 }
 
