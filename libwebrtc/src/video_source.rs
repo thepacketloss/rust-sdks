@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use livekit_protocol::enum_dispatch;
-
-use crate::imp::video_source as vs_imp;
+use crate::{enum_dispatch, imp::video_source as vs_imp};
 
 #[derive(Debug, Clone)]
 pub struct VideoResolution {
@@ -51,6 +49,8 @@ pub mod native {
 
     use super::*;
     use crate::native::packet_trailer::PacketTrailerHandler;
+    #[cfg(target_os = "linux")]
+    use crate::video_frame::FrameMetadata;
     use crate::video_frame::{VideoBuffer, VideoFrame};
 
     #[derive(Clone)]
@@ -77,6 +77,44 @@ pub mod native {
 
         pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) {
             self.handle.capture_frame(frame)
+        }
+
+        /// Captures a Jetson DMA-buffer backed video frame.
+        ///
+        /// `pixel_format` is `0` for NV12 and `1` for YUV420M.
+        #[cfg(target_os = "linux")]
+        pub fn capture_dmabuf_frame(
+            &self,
+            dmabuf_fd: i32,
+            width: u32,
+            height: u32,
+            pixel_format: i32,
+            timestamp_us: i64,
+        ) -> bool {
+            self.handle.capture_dmabuf_frame(dmabuf_fd, width, height, pixel_format, timestamp_us)
+        }
+
+        /// Captures a Jetson DMA-buffer backed video frame with packet trailer metadata.
+        ///
+        /// `pixel_format` is `0` for NV12 and `1` for YUV420M.
+        #[cfg(target_os = "linux")]
+        pub fn capture_dmabuf_frame_with_metadata(
+            &self,
+            dmabuf_fd: i32,
+            width: u32,
+            height: u32,
+            pixel_format: i32,
+            timestamp_us: i64,
+            frame_metadata: Option<FrameMetadata>,
+        ) -> bool {
+            self.handle.capture_dmabuf_frame_with_metadata(
+                dmabuf_fd,
+                width,
+                height,
+                pixel_format,
+                timestamp_us,
+                frame_metadata,
+            )
         }
 
         /// Set the packet trailer handler used by this source.

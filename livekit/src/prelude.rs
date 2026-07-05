@@ -18,7 +18,7 @@ pub use crate::{
     data_track::{
         DataTrackFrame, DataTrackInfo, DataTrackOptions, DataTrackSid, DataTrackStream,
         DataTrackSubscribeError, DataTrackSubscribeOptions, LocalDataTrack, PublishError,
-        PushFrameError, PushFrameErrorReason, RemoteDataTrack,
+        PushFrameError, PushFrameErrorReason, RemoteDataTrack, RemoteDataTrackPipelineOptions,
     },
     id::*,
     participant::{
@@ -27,9 +27,19 @@ pub use crate::{
     },
     publication::{LocalTrackPublication, RemoteTrackPublication, TrackPublication},
     track::{
-        AudioTrack, LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteAudioTrack, RemoteTrack,
-        RemoteVideoTrack, StreamState, Track, TrackDimension, TrackKind, TrackSource, VideoTrack,
+        AudioTrack, LocalAudioTrack, LocalTrack, LocalVideoTrack, PublishTimingEvent,
+        PublishTimingEventStream, PublishTimingStage, PublishingLayer, PublishingLayerQuality,
+        RemoteAudioTrack, RemoteTrack, RemoteVideoTrack, StreamState, SubscribeTimingEvent,
+        SubscribeTimingEventStream, SubscribeTimingStage, Track, TrackDimension, TrackKind,
+        TrackSource, VideoTrack,
     },
     ConnectionState, DataPacket, DataPacketKind, Room, RoomError, RoomEvent, RoomOptions,
     RoomResult, RoomSdkOptions, SipDTMF, Transcription, TranscriptionSegment,
+};
+
+// Platform audio device management (native platforms only)
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::platform_audio::{
+    AudioError, AudioProcessingOptions, AudioProcessingType, AudioResult, PlatformAudio,
+    PlayoutDeviceId, PlayoutDeviceInfo, RecordingDeviceId, RecordingDeviceInfo, RtcAudioSource,
 };

@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![doc = include_str!("../README.md")]
+
 #[cfg(feature = "access-token")]
 pub mod access_token;
+
+#[cfg(feature = "access-token")]
+mod jwt_provider;
 
 #[cfg(any(feature = "services-tokio", feature = "services-async"))]
 pub mod services;
@@ -33,6 +38,18 @@ pub mod signal_client;
     feature = "services-async"
 ))]
 mod http_client;
+
+// Region-discovery helpers shared by the signaling region provider
+// (signal_client::region_url_provider) and the API failover region cache
+// (services::failover).
+#[cfg(any(
+    feature = "signal-client-tokio",
+    feature = "signal-client-async",
+    feature = "signal-client-dispatcher",
+    feature = "services-tokio",
+    feature = "services-async"
+))]
+mod region;
 
 #[cfg(feature = "webhooks")]
 pub mod webhooks;

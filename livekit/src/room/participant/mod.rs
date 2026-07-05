@@ -14,8 +14,8 @@
 
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
+use libwebrtc::enum_dispatch;
 use livekit_protocol as proto;
-use livekit_protocol::enum_dispatch;
 use parking_lot::{Mutex, RwLock};
 
 use crate::{prelude::*, rtc_engine::RtcEngine};
@@ -23,7 +23,6 @@ use crate::{prelude::*, rtc_engine::RtcEngine};
 mod local_participant;
 mod remote_participant;
 mod rpc;
-use crate::room::utils;
 
 pub use local_participant::*;
 pub use remote_participant::*;
@@ -110,6 +109,7 @@ impl Participant {
         pub fn joined_at(self: &Self) -> i64;
         pub fn is_encrypted(self: &Self) -> bool;
         pub fn permission(self: &Self) -> Option<proto::ParticipantPermission>;
+        pub fn client_protocol(self: &Self) -> i32;
 
         pub(crate) fn update_info(self: &Self, info: proto::ParticipantInfo) -> ();
 
@@ -145,6 +145,7 @@ struct ParticipantInfo {
     pub disconnect_reason: DisconnectReason,
     pub joined_at: i64,
     pub permission: Option<proto::ParticipantPermission>,
+    pub client_protocol: i32,
 }
 
 type TrackMutedHandler = Box<dyn Fn(Participant, TrackPublication) + Send>;
@@ -195,6 +196,7 @@ pub(super) fn new_inner(
     kind_details: Vec<ParticipantKindDetail>,
     joined_at: i64,
     permission: Option<proto::ParticipantPermission>,
+    client_protocol: i32,
 ) -> Arc<ParticipantInner> {
     Arc::new(ParticipantInner {
         rtc_engine,
@@ -213,6 +215,7 @@ pub(super) fn new_inner(
             disconnect_reason: DisconnectReason::UnknownReason,
             joined_at,
             permission,
+            client_protocol,
         }),
         track_publications: Default::default(),
         events: Default::default(),
@@ -230,7 +233,7 @@ pub(super) fn update_info(
     info.state = new_info.state().into();
     info.disconnect_reason = new_info.disconnect_reason().into();
     info.kind = new_info.kind().into();
-    info.kind_details = super::utils::convert_kind_details(&new_info.kind_details);
+    info.kind_details = crate::utils::convert_kind_details(&new_info.kind_details);
     info.sid = new_info.sid.try_into().unwrap();
     info.identity = new_info.identity.into();
     info.joined_at = new_info.joined_at_ms;
@@ -251,7 +254,7 @@ pub(super) fn update_info(
 
     let old_attributes = std::mem::replace(&mut info.attributes, new_info.attributes.clone());
     let changed_attributes =
-        utils::calculate_changed_attributes(old_attributes, new_info.attributes.clone());
+        crate::utils::calculate_changed_attributes(old_attributes, new_info.attributes.clone());
     if changed_attributes.len() != 0 {
         if let Some(cb) = inner.events.attributes_changed.lock().as_ref() {
             cb(participant.clone(), changed_attributes);
@@ -264,6 +267,8 @@ pub(super) fn update_info(
             cb(participant.clone(), new_info.permission.clone());
         }
     }
+
+    info.client_protocol = new_info.client_protocol;
 }
 
 pub(super) fn set_speaking(

@@ -68,6 +68,38 @@ message DisconnectRequest {
 message DisconnectResponse { required uint64 async_id = 1; }
 message DisconnectCallback { required uint64 async_id = 1; }
 
+// Simulate a reconnection scenario for testing. Mirrors the variants of
+// `livekit::SimulateScenario`. The Resume / FullReconnect variants are
+// the relevant ones for verifying that resume preserves publications and
+// full reconnect republishes them exactly once.
+enum SimulateScenarioKind {
+  // Closes the signal channel locally; engine attempts a Resume.
+  SIMULATE_SIGNAL_RECONNECT = 0;
+  SIMULATE_SPEAKER = 1;
+  SIMULATE_NODE_FAILURE = 2;
+  SIMULATE_SERVER_LEAVE = 3;
+  SIMULATE_MIGRATION = 4;
+  SIMULATE_FORCE_TCP = 5;
+  SIMULATE_FORCE_TLS = 6;
+  // Asks the server to send `LeaveRequest{Reconnect}`, forcing a full
+  // reconnect (new RtcSession; SDK republishes existing local tracks).
+  SIMULATE_FULL_RECONNECT = 7;
+  // Asks the server to drop the signalling connection during the next resume,
+  // then triggers a resume locally. The resume cannot complete, so the engine
+  // escalates to a full reconnect — exercising the resume→full escalation path.
+  SIMULATE_DISCONNECT_SIGNAL_ON_RESUME = 8;
+}
+message SimulateScenarioRequest {
+  required uint64 room_handle = 1;
+  required SimulateScenarioKind scenario = 2;
+  optional uint64 request_async_id = 3;
+}
+message SimulateScenarioResponse { required uint64 async_id = 1; }
+message SimulateScenarioCallback {
+  required uint64 async_id = 1;
+  optional string error = 2;
+}
+
 // Publish a track to the room
 message PublishTrackRequest {
   required uint64 local_participant_handle = 1;
@@ -86,6 +118,11 @@ message PublishTrackCallback {
   }
 
 }
+
+message ReadyForRoomEventRequest {
+  required uint64 room_handle = 1;
+}
+message ReadyForRoomEventResponse {}
 
 // Unpublish a track from the room
 message UnpublishTrackRequest {
@@ -279,7 +316,38 @@ message TrackPublishOptions {
   optional TrackSource source = 7;
   optional string stream = 8;
   optional bool preconnect_buffer = 9;
-  repeated PacketTrailerFeature packet_trailer_features = 10;
+  repeated FrameMetadataFeature frame_metadata_features = 10;
+  // RTP scalability mode (e.g. "L3T3_KEY"). When set, a single RTP
+  // encoding is produced with this mode, enabling true SVC for codecs
+  // that support it (VP9, AV1). Has no effect for VP8/H264.
+  optional string scalability_mode = 11;
+  // Preferred encoder backend to use when publishing a video track.
+  optional VideoEncoderBackend video_encoder = 12;
+  // Controls how the encoder trades off between resolution and framerate
+  // when bandwidth is constrained. Default is MAINTAIN_RESOLUTION.
+  optional DegradationPreference degradation_preference = 13;
+}
+
+enum VideoEncoderBackend {
+  ENCODER_BACKEND_AUTO = 0;
+  ENCODER_BACKEND_SOFTWARE = 1;
+  ENCODER_BACKEND_HARDWARE = 2;
+  ENCODER_BACKEND_NVENC = 3;
+  ENCODER_BACKEND_VAAPI = 4;
+  ENCODER_BACKEND_VIDEOTOOLBOX = 5;
+}
+
+// Controls how the encoder degrades quality when bandwidth is constrained.
+enum DegradationPreference {
+  // Balance between framerate and resolution degradation.
+  DEGRADATION_PREFERENCE_BALANCED = 0;
+  // Degrade framerate to maintain resolution.
+  DEGRADATION_PREFERENCE_MAINTAIN_FRAMERATE = 1;
+  // Degrade resolution to maintain framerate (drop frames to keep clarity).
+  DEGRADATION_PREFERENCE_MAINTAIN_RESOLUTION = 2;
+  // Maintain both framerate and resolution. Frames may be dropped before encoding
+  // if necessary to avoid overusing network and encoder resources.
+  DEGRADATION_PREFERENCE_MAINTAIN_FRAMERATE_AND_RESOLUTION = 4;
 }
 
 enum IceTransportType {
@@ -410,6 +478,7 @@ message RoomEvent {
     ParticipantActive participant_active = 42;
     DataTrackPublished data_track_published = 43;
     DataTrackUnpublished data_track_unpublished = 44;
+    LocalTrackRepublished local_track_republished = 45;
   }
 }
 
@@ -456,6 +525,19 @@ message LocalTrackPublished {
 
 message LocalTrackUnpublished {
   required string publication_sid = 1;
+}
+
+// Fired when the SDK auto-republishes a local track during a full
+// reconnect. The FfiPublication handle is preserved across the cycle —
+// language bindings should look up the existing publication object by
+// `previous_sid` (its old SID), update its TrackPublicationInfo in place
+// with `info`, and rekey it under the new SID. Apps holding a cached
+// reference to the publication continue to see a valid object whose
+// reads/writes hit current state.
+message LocalTrackRepublished {
+  required uint64 publication_handle = 1;
+  required string previous_sid = 2;
+  required TrackPublicationInfo info = 3;
 }
 
 message LocalTrackSubscribed {

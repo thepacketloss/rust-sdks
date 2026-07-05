@@ -1,5 +1,4 @@
 use eframe::Renderer;
-use egui::ViewportBuilder;
 use parking_lot::deadlock;
 use std::thread;
 use std::time::Duration;
@@ -7,6 +6,7 @@ use std::time::Duration;
 mod app;
 mod data_track;
 mod logo_track;
+mod rpc_ui;
 mod service;
 mod sine_track;
 mod video_grid;

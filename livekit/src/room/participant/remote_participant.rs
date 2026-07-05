@@ -28,11 +28,7 @@ use super::{
     ConnectionQuality, ParticipantInner, ParticipantKind, ParticipantKindDetail, ParticipantState,
     TrackKind,
 };
-use crate::{
-    prelude::*,
-    rtc_engine::RtcEngine,
-    track::{TrackError, VideoQuality},
-};
+use crate::{prelude::*, rtc_engine::RtcEngine, track::TrackError};
 
 const ADD_TRACK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -89,6 +85,7 @@ impl RemoteParticipant {
         joined_at: i64,
         auto_subscribe: bool,
         permission: Option<proto::ParticipantPermission>,
+        client_protocol: i32,
     ) -> Self {
         Self {
             inner: super::new_inner(
@@ -103,6 +100,7 @@ impl RemoteParticipant {
                 kind_details,
                 joined_at,
                 permission,
+                client_protocol,
             ),
             remote: Arc::new(RemoteInfo { events: Default::default(), auto_subscribe }),
         }
@@ -456,18 +454,18 @@ impl RemoteParticipant {
                 let rtc_engine = rtc_engine.clone();
                 livekit_runtime::spawn(async move {
                     let tsid: String = publication.sid().into();
-                    let quality = match quality {
-                        VideoQuality::Low => proto::VideoQuality::Low,
-                        VideoQuality::Medium => proto::VideoQuality::Medium,
-                        VideoQuality::High => proto::VideoQuality::High,
-                    }
-                    .into();
+                    let quality: i32 = proto::VideoQuality::from(quality).into();
                     let update_track_settings = proto::UpdateTrackSettings {
                         track_sids: vec![tsid.clone()],
                         quality,
                         ..Default::default()
                     };
 
+                    log::info!(
+                        "subscriber: sending UpdateTrackSettings to SFU: track={}, quality={:?}",
+                        tsid,
+                        proto::VideoQuality::try_from(quality),
+                    );
                     rtc_engine
                         .send_request(proto::signal_request::Message::TrackSetting(
                             update_track_settings,
@@ -573,6 +571,10 @@ impl RemoteParticipant {
 
     pub fn permission(&self) -> Option<proto::ParticipantPermission> {
         self.inner.info.read().permission.clone()
+    }
+
+    pub fn client_protocol(&self) -> i32 {
+        self.inner.info.read().client_protocol
     }
 
     pub fn is_encrypted(&self) -> bool {

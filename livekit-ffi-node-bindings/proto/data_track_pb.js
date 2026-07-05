@@ -347,6 +347,37 @@ const RemoteDataTrackIsPublishedResponse = /*@__PURE__*/ proto2.makeMessageType(
 );
 
 /**
+ * Track-level options that configure how the incoming-frame pipeline reassembles packets for a remote data track.
+ *
+ * @generated from message livekit.proto.RemoteDataTrackPipelineOptions
+ */
+const RemoteDataTrackPipelineOptions = /*@__PURE__*/ proto2.makeMessageType(
+  "livekit.proto.RemoteDataTrackPipelineOptions",
+  () => [
+    { no: 1, name: "max_partial_frames", kind: "scalar", T: 13 /* ScalarType.UINT32 */, opt: true },
+  ],
+);
+
+/**
+ * @generated from message livekit.proto.RemoteDataTrackSetPipelineOptionsRequest
+ */
+const RemoteDataTrackSetPipelineOptionsRequest = /*@__PURE__*/ proto2.makeMessageType(
+  "livekit.proto.RemoteDataTrackSetPipelineOptionsRequest",
+  () => [
+    { no: 1, name: "track_handle", kind: "scalar", T: 4 /* ScalarType.UINT64 */, req: true },
+    { no: 2, name: "options", kind: "message", T: RemoteDataTrackPipelineOptions, req: true },
+  ],
+);
+
+/**
+ * @generated from message livekit.proto.RemoteDataTrackSetPipelineOptionsResponse
+ */
+const RemoteDataTrackSetPipelineOptionsResponse = /*@__PURE__*/ proto2.makeMessageType(
+  "livekit.proto.RemoteDataTrackSetPipelineOptionsResponse",
+  [],
+);
+
+/**
  * Subscribe to a data track.
  *
  * @generated from message livekit.proto.SubscribeDataTrackRequest
@@ -391,7 +422,9 @@ const DataTrackStreamReadRequest = /*@__PURE__*/ proto2.makeMessageType(
  */
 const DataTrackStreamReadResponse = /*@__PURE__*/ proto2.makeMessageType(
   "livekit.proto.DataTrackStreamReadResponse",
-  [],
+  () => [
+    { no: 1, name: "eos_event", kind: "message", T: DataTrackStreamEOS, opt: true },
+  ],
 );
 
 /**
@@ -428,7 +461,7 @@ const DataTrackStreamFrameReceived = /*@__PURE__*/ proto2.makeMessageType(
 const DataTrackStreamEOS = /*@__PURE__*/ proto2.makeMessageType(
   "livekit.proto.DataTrackStreamEOS",
   () => [
-    { no: 1, name: "error", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 1, name: "error", kind: "message", T: SubscribeDataTrackError, opt: true },
   ],
 );
 
@@ -459,6 +492,9 @@ exports.OwnedDataTrackStream = OwnedDataTrackStream;
 exports.DataTrackSubscribeOptions = DataTrackSubscribeOptions;
 exports.RemoteDataTrackIsPublishedRequest = RemoteDataTrackIsPublishedRequest;
 exports.RemoteDataTrackIsPublishedResponse = RemoteDataTrackIsPublishedResponse;
+exports.RemoteDataTrackPipelineOptions = RemoteDataTrackPipelineOptions;
+exports.RemoteDataTrackSetPipelineOptionsRequest = RemoteDataTrackSetPipelineOptionsRequest;
+exports.RemoteDataTrackSetPipelineOptionsResponse = RemoteDataTrackSetPipelineOptionsResponse;
 exports.SubscribeDataTrackRequest = SubscribeDataTrackRequest;
 exports.SubscribeDataTrackResponse = SubscribeDataTrackResponse;
 exports.DataTrackStreamReadRequest = DataTrackStreamReadRequest;

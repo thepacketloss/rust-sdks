@@ -139,6 +139,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - bump libwebrtc to m125
+## 0.3.39 (2026-06-30)
+
+### Features
+
+#### Improve initial video quality by setting `x-google-start-bitrate` SDP hint for all video codecs (VP8, VP9, AV1, H264, H265) and defaulting to `MaintainResolution` degradation preference.
+
+This addresses the issue where video starts blurry for several seconds before improving, by:
+1. Telling WebRTC's bandwidth estimator to start at 70% of target bitrate instead of ramping up from ~300kbps
+2. Preferring frame drops over resolution reduction when bandwidth is constrained
+
+The `DegradationPreference` option is now exposed via FFI for Python, C++, Unity, and Node SDKs.
+
+#### Add `MaintainFramerateAndResolution` to `DegradationPreference` enum to align with WebRTC M144.
+
+- `MAINTAIN_FRAMERATE_AND_RESOLUTION` is now the recommended value (replaces deprecated `DISABLED`)
+- `DISABLED` is deprecated but still supported for backwards compatibility
+- Both values map to the same behavior: maintain framerate and resolution, dropping frames if needed
+
+### Fixes
+
+- Fix AV1 subscriber decode when packet trailers are enabled.
+
+## 0.3.38 (2026-06-23)
+
+### Fixes
+
+- Upgrade protocol to v1.48.0
+
+## 0.3.37 (2026-06-17)
+
+### Features
+
+#### Add dynacast support - #1003 (@chenosaurus, @stephen-derosa)
+
+This includes a minor breaking change for `libwebrtc`: `RtpParameters` now
+contains additional RTP sender state that must be preserved when round-tripping
+through `set_parameters()`.
+
+#### Make GLib an opt-in dependency
+
+`webrtc-sys` no longer links against `glib-2.0`/`gobject-2.0`/`gio-2.0` by default.
+
+Breaking: Wayland screen sharing now requires the `glib-main-loop` feature on `livekit` (or `libwebrtc`).
+
+### Fixes
+
+- Fix silent subscription failures in single-pc mode when the SFU reuses an existing empty transceiver for a new remote track. Also make `RtpTransceiver::mid()` safe to call on transceivers that haven't been negotiated yet — libwebrtc is built with `-fno-exceptions`, so `std::optional::value()` aborted the process instead of throwing.
+- Add `LK_DISABLE_NVDEC` to bypass NVIDIA NVDEC decoder registration when the environment variable is set.
+- Add Jetson DMA-buffer video publishing support for libargus MIPI capture and the Jetson hardware encoder, including AV1 hardware encoding on supported Jetson Orin devices.
+
+## 0.3.36 (2026-06-09)
+
+### Fixes
+
+- Fix NVIDIA encoder I420 uploads to copy each plane using its actual source stride, avoiding chroma corruption when source frames use padded YUV planes. Also fix the `local_video` publisher reusing mutable I420 frame storage after handing frames to WebRTC.
+- Keep one-frame native video streams as latest-frame queues. Move local video subscriber timing metrics into the example and use the WGPU paint callback as the render boundary.
+- Add per-publication video encoder backend selection. Add a video encoder backend availability query. Remove `LIVEKIT_PREFERRED_HW_ENCODER` in favor of per-publication backend selection.
+
+## 0.3.35 (2026-05-29)
+
+### Fixes
+
+- Add native video pipeline timing instrumentation for local video measurements, exposing local publish and subscribe timing through async streams and subscriber overlay GPU upload and receive-to-GPU latency metrics through explicit timing observers.
+
+## 0.3.34 (2026-05-21)
+
+### Fixes
+
+#### feat: add Android application context initialization for PlatformAudio support.
+
+Android requires `ContextUtils.initialize(applicationContext)` before WebRTC audio components can be created. This change:
+
+- Adds `livekit_ffi_initialize_android_context()` C FFI function for Unity and other FFI consumers
+- Uses `CreateAndroidAudioDeviceModule()` instead of generic `CreateAudioDeviceModule()` on Android
+- Handles empty device GUIDs on Android (falls back to index 0)
+- Documents Android-specific limitations: single default device, no app-level device selection
+
+Platform notes:
+- Android device enumeration returns only one "default" device with empty name/GUID
+- Audio routing (speaker/earpiece/Bluetooth) is controlled by Android's AudioManager, not WebRTC
+
+## 0.3.33 (2026-05-14)
+
+### Fixes
+
+- feat: add scalability mode for AV1/VP9. - #1076 (@cloudwebrtc)
+- Add `LIVEKIT_PREFERRED_HW_ENCODER` to prefer `nvenc` or `vaapi` hardware video encoding when both are available.
+- Relocate unrelated types out of `livekit-protocol`
+
+#### Get WebRTC ADM into Rust - #1037 (@xianshijing-lk)
+
+This PR introduces platform audio device management via WebRTC's Audio Device Module (ADM).
+
+#### Features
+- **ADM Proxy**: New `AdmProxy` class that switches between Dummy ADM (synthetic mode) and Platform ADM (real audio I/O)
+- **PlatformAudio API**: High-level Rust API for microphone capture and speaker playout with AEC/AGC/NS
+- **Device enumeration**: List and select recording/playout devices by index or GUID
+- **Mode switching**: Seamlessly switch between synthetic mode (FFI callbacks) and platform mode (native speakers) while audio is active
+- **FFI platform audio support**: Expose platform audio device enumeration and selection through `livekit-ffi`
+- **Audio processing**: Configure echo cancellation, noise suppression, and auto gain control with platform-specific defaults (hardware on iOS, software elsewhere)
+
+#### Audio Modes
+| Mode | Recording | Playout | Use Case |
+|------|-----------|---------|----------|
+| Synthetic | NativeAudioSource | Dummy ADM + FFI | Unity audio, agents |
+| Platform | Platform ADM mic | Platform ADM speakers | VoIP with AEC |
+
+#### API
+```rust
+// Create PlatformAudio for microphone/speaker access
+let audio = PlatformAudio::new()?;
+
+// Enumerate and select devices
+for i in 0..audio.recording_devices() as u16 {
+    println!("Mic {}: {}", i, audio.recording_device_name(i));
+}
+audio.set_recording_device(0)?;
+
+// Create audio track for publishing
+let track = LocalAudioTrack::create_audio_track("mic", audio.rtc_source());
+```
+
+## 0.3.32 (2026-05-11)
+
+### Fixes
+
+- Upgrade protocol to v1.45.8
+
+## 0.3.31 (2026-05-10)
+
+### Fixes
+
+- Fix missing `libwebrtc.jar` for Android builds, harden build scripts
+- fix race in download_webrtc to reduce flaky build - #1047 (@hechen-eng)
+- Improve WebRTC build scripts and add external_audio_source patch - #1053 (@xianshijing-lk)
+
 ## 0.3.30 (2026-04-23)
 
 ### Features

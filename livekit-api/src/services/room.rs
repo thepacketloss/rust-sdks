@@ -40,6 +40,12 @@ pub struct UpdateParticipantOptions {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct RemoveParticipantOptions {
+    /// Revoke all tokens issued to this participant before this Unix timestamp (ms).
+    pub revoke_token_ts: i64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SendDataOptions {
     pub kind: proto::data_packet::Kind,
     #[deprecated(note = "Use destination_identities instead")]
@@ -67,25 +73,69 @@ impl RoomClient {
         Ok(Self::with_api_key(host, &api_key, &api_secret))
     }
 
+    /// Enables or disables region failover (enabled by default). Failover only
+    /// engages for LiveKit Cloud hosts.
+    pub fn with_failover(mut self, enabled: bool) -> Self {
+        self.client = self.client.with_failover(enabled);
+        self
+    }
+
+    /// Overrides the default per-request timeout (10s) for calls on this client.
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.client = self.client.with_request_timeout(timeout);
+        self
+    }
+
     pub async fn create_room(
         &self,
         name: &str,
         options: CreateRoomOptions,
     ) -> ServiceResult<proto::Room> {
+        self.create_room_request(proto::CreateRoomRequest {
+            name: name.to_owned(),
+            empty_timeout: options.empty_timeout,
+            departure_timeout: options.departure_timeout,
+            max_participants: options.max_participants,
+            node_id: options.node_id,
+            metadata: options.metadata,
+            egress: options.egress,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Create a room with an explicit subscriber playout delay.
+    pub async fn create_room_with_playout_delay(
+        &self,
+        name: &str,
+        options: CreateRoomOptions,
+        min_playout_delay: u32,
+        max_playout_delay: u32,
+    ) -> ServiceResult<proto::Room> {
+        self.create_room_request(proto::CreateRoomRequest {
+            name: name.to_owned(),
+            empty_timeout: options.empty_timeout,
+            departure_timeout: options.departure_timeout,
+            max_participants: options.max_participants,
+            node_id: options.node_id,
+            metadata: options.metadata,
+            egress: options.egress,
+            min_playout_delay,
+            max_playout_delay,
+            ..Default::default()
+        })
+        .await
+    }
+
+    async fn create_room_request(
+        &self,
+        request: proto::CreateRoomRequest,
+    ) -> ServiceResult<proto::Room> {
         self.client
             .request(
                 SVC,
                 "CreateRoom",
-                proto::CreateRoomRequest {
-                    name: name.to_owned(),
-                    empty_timeout: options.empty_timeout,
-                    departure_timeout: options.departure_timeout,
-                    max_participants: options.max_participants,
-                    node_id: options.node_id,
-                    metadata: options.metadata,
-                    egress: options.egress,
-                    ..Default::default()
-                },
+                request,
                 self.base
                     .auth_header(VideoGrants { room_create: true, ..Default::default() }, None)?,
             )
@@ -175,6 +225,7 @@ impl RoomClient {
                 proto::RoomParticipantIdentity {
                     room: room.to_owned(),
                     identity: identity.to_owned(),
+                    ..Default::default()
                 },
                 self.base.auth_header(
                     VideoGrants { room_admin: true, room: room.to_owned(), ..Default::default() },
@@ -186,6 +237,16 @@ impl RoomClient {
     }
 
     pub async fn remove_participant(&self, room: &str, identity: &str) -> ServiceResult<()> {
+        self.remove_participant_with_options(room, identity, RemoveParticipantOptions::default())
+            .await
+    }
+
+    pub async fn remove_participant_with_options(
+        &self,
+        room: &str,
+        identity: &str,
+        options: RemoveParticipantOptions,
+    ) -> ServiceResult<()> {
         self.client
             .request(
                 SVC,
@@ -193,6 +254,7 @@ impl RoomClient {
                 proto::RoomParticipantIdentity {
                     room: room.to_owned(),
                     identity: identity.to_owned(),
+                    revoke_token_ts: options.revoke_token_ts,
                 },
                 self.base.auth_header(
                     VideoGrants { room_admin: true, room: room.to_owned(), ..Default::default() },

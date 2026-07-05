@@ -17,13 +17,13 @@
 //! These tests verify that both V0 (dual peer connection) and V1 (single peer connection)
 //! signaling modes work correctly.
 //!
-//! V0 (Dual PC): Traditional mode with separate publisher and subscriber peer connections
-//!               Works on localhost with `livekit-server --dev`
+//! V0 (Dual PC): Traditional mode with separate publisher and subscriber peer connections.
+//! V1 (Single PC): Single peer connection for both publish and subscribe via `/rtc/v1`.
 //!
-//! V1 (Single PC): New mode with a single peer connection for both publish and subscribe
-//!                 Requires LiveKit Cloud or a server that supports /rtc/v1 endpoint.
-//!                 NOTE: V1 tests will fall back to V0 on localhost, so to truly test V1,
-//!                 you must set the cloud environment variables.
+//! Both modes are supported by `livekit-server --dev` (and by LiveKit Cloud); the test
+//! suite exercises whichever path the server actually negotiates. If your server is too
+//! old to expose `/rtc/v1`, V1 tests will simply fall back to V0 — no special handling
+//! is required from the test framework.
 //!
 //! Environment variables:
 //! - LIVEKIT_URL: The LiveKit server URL (defaults to ws://localhost:7880)
@@ -103,30 +103,39 @@ fn get_env_for_mode(_mode: SignalingMode) -> (String, String, String) {
     (url, api_key, api_secret)
 }
 
-fn is_local_dev_server(url: &str) -> bool {
-    url.contains("localhost:7880") || url.contains("127.0.0.1:7880")
+/// Poll `cond` until it returns `Some(_)`, sleeping briefly between attempts,
+/// up to `timeout`. Returns whatever the predicate produced, or `None` if the
+/// timeout elapsed first.
+///
+/// Use instead of unconditional `tokio::time::sleep` after async events whose
+/// completion timing is unpredictable but whose effects you can observe — the
+/// test runs as fast as the system can deliver the result, instead of always
+/// burning the worst-case wait.
+async fn wait_until<T>(timeout: Duration, mut cond: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(value) = cond() {
+            return Some(value);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
-fn assert_signaling_mode_state(room: &Room, mode: SignalingMode, url: &str) {
+fn assert_signaling_mode_state(room: &Room, mode: SignalingMode, _url: &str) {
     let active_single_pc = room.is_single_peer_connection_active();
     match mode {
         SignalingMode::DualPC => {
             assert!(!active_single_pc, "DualPC test should not have single-PC mode active");
         }
         SignalingMode::SinglePC => {
-            if is_local_dev_server(url) {
-                // Local dev server behavior may vary by version:
-                // older versions fallback to v0, newer versions may support /rtc/v1.
-                log::info!(
-                    "SinglePC on localhost: single_pc_active={} (fallback to v0 expected on older servers)",
-                    active_single_pc
-                );
-            } else {
-                assert!(
-                    active_single_pc,
-                    "SinglePC requested on non-localhost URL should stay in single-PC mode"
-                );
-            }
+            assert!(
+                active_single_pc,
+                "SinglePC requested but server did not negotiate /rtc/v1 \
+                 (server may be too old)"
+            );
         }
     }
 }
@@ -280,26 +289,6 @@ async fn test_v1_publish_ten_video_and_ten_audio_tracks() -> Result<()> {
     test_publish_ten_video_and_ten_audio_tracks_impl(SignalingMode::SinglePC).await
 }
 
-/// Test explicit localhost fallback behavior for V1 signaling
-#[test_log::test(tokio::test)]
-async fn test_v1_localhost_fallback_to_v0() -> Result<()> {
-    if env::var("LIVEKIT_URL").is_ok() {
-        log::info!("Skipping localhost fallback test because LIVEKIT_URL override is set");
-        return Ok(());
-    }
-
-    let room_name = format!("test_v1_localhost_fallback_{}", create_random_uuid());
-    let token = create_token(DEFAULT_API_KEY, DEFAULT_API_SECRET, &room_name, "fallback_test")?;
-    let (room, _events) =
-        connect_room(DEFAULT_LOCALHOST_URL, &token, SignalingMode::SinglePC).await?;
-    if room.is_single_peer_connection_active() {
-        log::info!("Localhost server supports /rtc/v1; skipping fallback assertion");
-        return Ok(());
-    }
-    assert!(!room.is_single_peer_connection_active(), "Expected fallback to v0");
-    Ok(())
-}
-
 /// Test that a participant with can_subscribe=false in their token can connect without timing out.
 #[test_log::test(tokio::test)]
 async fn test_v0_connect_can_subscribe_false() -> Result<()> {
@@ -323,6 +312,82 @@ async fn test_v1_double_reconnect() -> Result<()> {
     test_double_reconnect_impl(SignalingMode::SinglePC).await
 }
 
+/// A resume that fails once must escalate to a full reconnect (not loop on
+/// resume). The first resume attempt is forced to fail via fault injection; the
+/// engine must then recover by doing a full reconnect.
+#[test_log::test(tokio::test)]
+async fn test_v0_resume_failure_escalates_to_full_reconnect() -> Result<()> {
+    test_resume_failure_escalates_impl(SignalingMode::DualPC).await
+}
+
+#[test_log::test(tokio::test)]
+async fn test_v1_resume_failure_escalates_to_full_reconnect() -> Result<()> {
+    test_resume_failure_escalates_impl(SignalingMode::SinglePC).await
+}
+
+/// A failure surfacing during an in-flight resume must escalate the *next* resume
+/// cycle to a full reconnect (sticky escalation), instead of looping on resume.
+/// Reproduces the production migration loop. The mid-resume failure is injected via
+/// the same `reconnection_needed` path a server `Leave{Resume}` takes.
+#[test_log::test(tokio::test)]
+async fn test_v0_resume_escalation_sticks_across_cycles() -> Result<()> {
+    test_resume_escalation_sticks_across_cycles_impl(SignalingMode::DualPC).await
+}
+
+#[test_log::test(tokio::test)]
+async fn test_v1_resume_escalation_sticks_across_cycles() -> Result<()> {
+    test_resume_escalation_sticks_across_cycles_impl(SignalingMode::SinglePC).await
+}
+
+/// Corner case: resume without ever having published a track. In single-PC mode
+/// this exercises the publisher ICE restart even though `has_published=false`
+/// (the fix for the single-PC publisher gating bug). In dual-PC subscriber-
+/// primary mode it just confirms a no-track resume doesn't regress.
+#[test_log::test(tokio::test)]
+async fn test_v0_resume_without_prior_publish() -> Result<()> {
+    test_resume_without_prior_publish_impl(SignalingMode::DualPC).await
+}
+
+#[test_log::test(tokio::test)]
+async fn test_v1_resume_without_prior_publish() -> Result<()> {
+    test_resume_without_prior_publish_impl(SignalingMode::SinglePC).await
+}
+
+/// Corner case: a queueable mutation (mute) issued *during* a signal
+/// reconnect must reach the server after the resume completes. This is the
+/// test that exercises both halves of the pass-through fix:
+/// 1. Trickle ICE candidates emitted internally during the reconnect must
+///    flow to the server (else ICE wouldn't reconnect and the resume would
+///    time out — implicit in any successful resume).
+/// 2. The user's mute_track call must be queued, NOT dropped, and flushed
+///    after `set_reconnected()`. We verify the subscriber observes the mute.
+#[test_log::test(tokio::test)]
+async fn test_v0_mute_during_reconnect_lands_on_server() -> Result<()> {
+    test_mute_during_reconnect_impl(SignalingMode::DualPC).await
+}
+
+#[test_log::test(tokio::test)]
+async fn test_v1_mute_during_reconnect_lands_on_server() -> Result<()> {
+    test_mute_during_reconnect_impl(SignalingMode::SinglePC).await
+}
+
+/// Regression test for the publisher-offer pre-allocation path.
+///
+/// A connects first with single-PC + publisher_offer. Its initial offer
+/// includes 3 audio + 3 video recvonly transceivers pre-allocated, so the
+/// SFU's answer to A has empty `sendonly` slots with no `a=msid`. Later B
+/// joins and publishes a track; the SFU binds that track to one of A's
+/// pre-allocated recvonly slots, populating msid on an existing client-side
+/// transceiver — exactly the path libwebrtc-native's `OnTrack` does NOT
+/// refire for.
+///
+/// Without the blink-style diff this test fails (A never receives
+/// `TrackSubscribed`). With the diff, A subscribes successfully.
+#[test_log::test(tokio::test)]
+async fn test_v1_publisher_offer_subscribes_late_publish() -> Result<()> {
+    test_publisher_offer_late_publish_impl(SignalingMode::SinglePC).await
+}
+
 // ==================== Test Implementations ====================
 
 /// Test basic connection
@@ -341,9 +406,6 @@ async fn test_connect_impl(mode: SignalingMode) -> Result<()> {
     // Verify connection is working
     assert_eq!(room.connection_state(), ConnectionState::Connected);
     assert_signaling_mode_state(&room, mode, &url);
-
-    // Give it a moment to ensure connection is stable
-    tokio::time::sleep(Duration::from_secs(2)).await;
 
     log::info!("[{}] Test passed - connection working!", mode.name());
     Ok(())
@@ -641,10 +703,7 @@ async fn test_reconnect_impl(mode: SignalingMode) -> Result<()> {
         .await
         .context("Timeout waiting for reconnection")??;
 
-    // Give some time for state to stabilize
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Verify room is connected
+    // Verify room is connected (Reconnected event implies this; assert defensively).
     assert_eq!(
         pub_room_arc.connection_state(),
         ConnectionState::Connected,
@@ -656,18 +715,29 @@ async fn test_reconnect_impl(mode: SignalingMode) -> Result<()> {
     log::info!("[{}] Tracks published after reconnect: {}", mode.name(), tracks_after);
     assert_eq!(tracks_before, tracks_after, "Track count should be preserved after reconnect");
 
-    // Verify subscriber can still see the publisher's tracks
-    let remote_participants = sub_room.remote_participants();
-    let publisher_entry = remote_participants
-        .iter()
-        .find(|(_, p)| p.identity().as_str() == publisher_identity.as_str());
+    // Subscriber-side participant/track propagation is asynchronous after the
+    // publisher's Reconnected event — the SFU forwards the participant info on
+    // its own schedule. Poll up to 5s instead of unconditionally sleeping 2s,
+    // so this completes as fast as the SFU can deliver the update.
+    let saw_publisher_tracks = wait_until(Duration::from_secs(5), || {
+        let remote_participants = sub_room.remote_participants();
+        let publisher_entry = remote_participants
+            .iter()
+            .find(|(_, p)| p.identity().as_str() == publisher_identity.as_str());
+        publisher_entry.and_then(|(_, p)| {
+            let n = p.track_publications().len();
+            (n > 0).then_some(n)
+        })
+    })
+    .await;
 
-    if let Some((_, publisher)) = publisher_entry {
-        let remote_tracks = publisher.track_publications().len();
-        log::info!("[{}] Subscriber sees {} tracks from publisher", mode.name(), remote_tracks);
-        assert!(remote_tracks > 0, "Subscriber should still see publisher's tracks");
+    if let Some(n) = saw_publisher_tracks {
+        log::info!("[{}] Subscriber sees {} tracks from publisher", mode.name(), n);
     } else {
-        log::warn!("[{}] Publisher not found in remote participants", mode.name());
+        log::warn!(
+            "[{}] Subscriber did not observe publisher's tracks within timeout",
+            mode.name()
+        );
     }
 
     log::info!("[{}] Test passed - reconnection working!", mode.name());
@@ -773,12 +843,17 @@ async fn test_node_failure_impl(mode: SignalingMode) -> Result<()> {
         .await
         .context("Timeout waiting for reconnection after node failure")??;
 
-    // Give time for track republishing
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Republish runs asynchronously after Reconnected: each track is unpublished
+    // then re-published, which is signal+ICE round-trip. Poll up to 5s for the
+    // publication count to recover instead of unconditionally sleeping 3s.
+    let tracks_after = wait_until(Duration::from_secs(5), || {
+        let n = room_arc.local_participant().track_publications().len();
+        (n == tracks_before).then_some(n)
+    })
+    .await
+    .unwrap_or_else(|| room_arc.local_participant().track_publications().len());
 
-    let tracks_after = room_arc.local_participant().track_publications().len();
     log::info!("[{}] Tracks after node failure reconnect: {}", mode.name(), tracks_after);
-
     assert_eq!(tracks_before, tracks_after, "Tracks should be restored after node failure");
 
     log::info!("[{}] Test passed - node failure recovery working!", mode.name());
@@ -818,6 +893,152 @@ async fn test_connect_can_subscribe_false_impl(mode: SignalingMode) -> Result<()
     Ok(())
 }
 
+/// Test resume on a room that has not published anything.
+///
+/// In single-PC mode the publisher PC is the *only* transport. Pre-fix, the
+/// engine skipped the ICE restart on resume when `has_published=false`, leaving
+/// the only transport on stale ICE credentials and tripping a full reconnect.
+/// This test connects with `single_peer_connection=true`, never publishes,
+/// triggers `SignalReconnect`, and asserts the resume completes.
+async fn test_resume_without_prior_publish_impl(mode: SignalingMode) -> Result<()> {
+    let (url, api_key, api_secret) = get_env_for_mode(mode);
+    let room_name = format!("test_{:?}_no_pub_resume_{}", mode, create_random_uuid());
+    let token = create_token(&api_key, &api_secret, &room_name, "no_pub_tester")?;
+
+    let (room, mut events) = connect_room(&url, &token, mode).await?;
+    assert_signaling_mode_state(&room, mode, &url);
+
+    assert_eq!(
+        room.local_participant().track_publications().len(),
+        0,
+        "precondition: no tracks published"
+    );
+
+    log::info!("[{}] Triggering SignalReconnect with no published tracks", mode.name());
+    room.simulate_scenario(SimulateScenario::SignalReconnect).await?;
+
+    let wait_reconnected = async {
+        loop {
+            let Some(event) = events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            if let RoomEvent::Reconnected = event {
+                return Ok(());
+            }
+        }
+    };
+    timeout(Duration::from_secs(30), wait_reconnected)
+        .await
+        .context("Timeout waiting for resume to complete with no published tracks")??;
+    assert_eq!(room.connection_state(), ConnectionState::Connected);
+
+    // Now publish — the post-resume PC must accept negotiation. If the resume
+    // left the publisher PC on stale ICE (the bug), this publish would fail or
+    // hang because the renegotiation rides the same dead transport.
+    let room_arc = Arc::new(room);
+    let sine_params =
+        SineParameters { freq: 440.0, amplitude: 1.0, sample_rate: 48000, num_channels: 1 };
+    let mut sine_track = SineTrack::new(room_arc.clone(), sine_params);
+    timeout(Duration::from_secs(10), sine_track.publish())
+        .await
+        .context("Timeout publishing after resume-without-prior-publish")??;
+
+    Ok(())
+}
+
+/// Test that a queueable mutation issued *during* a signal reconnect reaches
+/// the server after the resume completes, and the subscriber observes it.
+///
+/// Exercises both halves of the pass-through fix:
+/// 1. Pass-through Trickles emitted internally during the reconnect must flow
+///    over the new WS — implicit in any successful resume.
+/// 2. The user's mute call (`Mute` is queueable) must be queued, not dropped,
+///    and flushed by `set_reconnected()` after the resume completes. The
+///    subscriber should see `RoomEvent::TrackMuted`.
+async fn test_mute_during_reconnect_impl(mode: SignalingMode) -> Result<()> {
+    log::info!("[{}] Testing mute during reconnect", mode.name());
+    let mut rooms = test_rooms_with_options([room_options(mode), room_options(mode)]).await?;
+    let (sub_room, mut sub_events) = rooms.pop().unwrap();
+    let (pub_room, mut pub_events) = rooms.pop().unwrap();
+    let pub_room_arc = Arc::new(pub_room);
+
+    let sine_params =
+        SineParameters { freq: 440.0, amplitude: 1.0, sample_rate: 48000, num_channels: 1 };
+    let mut sine_track = SineTrack::new(pub_room_arc.clone(), sine_params);
+    sine_track.publish().await?;
+
+    // Wait for the subscriber to receive the track before reconnecting.
+    let wait_subscribed = async {
+        loop {
+            let Some(event) = sub_events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            if let RoomEvent::TrackSubscribed { .. } = event {
+                return Ok(());
+            }
+        }
+    };
+    timeout(Duration::from_secs(15), wait_subscribed)
+        .await
+        .context("Timeout waiting for initial track subscription")??;
+
+    // Snapshot the publication so we can mute it during the reconnect window.
+    let pub_publication = pub_room_arc
+        .local_participant()
+        .track_publications()
+        .into_iter()
+        .next()
+        .map(|(_, p)| p)
+        .ok_or_else(|| anyhow!("publisher has no publications after publish"))?;
+    let track_sid = pub_publication.sid().to_string();
+
+    log::info!("[{}] Triggering reconnect, then immediately muting", mode.name());
+    pub_room_arc.simulate_scenario(SimulateScenario::SignalReconnect).await?;
+
+    // The reconnect window opens here. The mute is issued while the engine is
+    // mid-resume, so the underlying signal_client.send(Mute) is queued (Mute is
+    // a queueable signal). Without the fix, the queue was drained inside
+    // `SignalInner::restart` *before* SyncState; now it's drained by
+    // `set_reconnected()` after the resume has fully recovered.
+    pub_publication.mute();
+
+    // Wait for the subscriber to observe the mute. Use a generous timeout
+    // because the mute can only land after: WS reconnect + SyncState + ICE
+    // restart + set_reconnected → flush queue → server forwards to subscriber.
+    let wait_mute = async {
+        loop {
+            let Some(event) = sub_events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            if let RoomEvent::TrackMuted { publication, .. } = event {
+                if publication.sid().to_string() == track_sid {
+                    return Ok(());
+                }
+            }
+        }
+    };
+    timeout(Duration::from_secs(30), wait_mute)
+        .await
+        .context("Timeout waiting for subscriber to observe mute issued during reconnect")??;
+
+    // Sanity: publisher side should also have completed the resume.
+    let wait_pub_reconnected = async {
+        loop {
+            match pub_events.recv().await {
+                Some(RoomEvent::Reconnected) => return Ok(()),
+                Some(_) => {}
+                None => return Err(anyhow!("Event channel closed")),
+            }
+        }
+    };
+    // The Reconnected event likely already fired before we got the mute;
+    // give a short fallback timeout in case the test framework drained it.
+    let _ = timeout(Duration::from_secs(5), wait_pub_reconnected).await;
+    assert_eq!(pub_room_arc.connection_state(), ConnectionState::Connected);
+
+    Ok(())
+}
+
 /// Test two sequential reconnect cycles on the same room connection
 async fn test_double_reconnect_impl(mode: SignalingMode) -> Result<()> {
     let (url, api_key, api_secret) = get_env_for_mode(mode);
@@ -851,5 +1072,293 @@ async fn test_double_reconnect_impl(mode: SignalingMode) -> Result<()> {
         assert_eq!(room.connection_state(), ConnectionState::Connected);
     }
 
+    Ok(())
+}
+
+/// Verify that a single resume failure escalates to a full reconnect.
+///
+/// Forces the first resume attempt to fail via fault injection, then asserts the
+/// engine recovers by escalating to a full reconnect — observed via
+/// `LocalTrackRepublished`, which only the full-reconnect path emits (a resume
+/// preserves publications and never republishes). Without escalation the engine
+/// would keep retrying resume and the connection would never recover. Covers both
+/// dual-PC and single-PC signaling.
+async fn test_resume_failure_escalates_impl(mode: SignalingMode) -> Result<()> {
+    let (url, api_key, api_secret) = get_env_for_mode(mode);
+    let room_name = format!("test_{:?}_resume_fail_escalate_{}", mode, create_random_uuid());
+    let token = create_token(&api_key, &api_secret, &room_name, "resume_fail_tester")?;
+
+    let (room, mut events) = connect_room(&url, &token, mode).await?;
+    assert_signaling_mode_state(&room, mode, &url);
+
+    let room_arc = Arc::new(room);
+
+    // Publish a track so the full-reconnect path has something to republish (the
+    // `LocalTrackRepublished` event is our proof that escalation occurred).
+    let sine_params =
+        SineParameters { freq: 440.0, amplitude: 1.0, sample_rate: 48000, num_channels: 1 };
+    let mut sine_track = SineTrack::new(room_arc.clone(), sine_params);
+    sine_track.publish().await?;
+
+    let tracks_before = room_arc.local_participant().track_publications().len();
+    assert_eq!(tracks_before, 1, "precondition: one track published");
+
+    // Arm the fault: the next resume attempt fails. The engine must escalate to a
+    // full reconnect instead of looping on resume.
+    room_arc.fail_next_resume_attempts(1);
+
+    log::info!("[{}] Triggering reconnect with the first resume forced to fail", mode.name());
+    room_arc.simulate_scenario(SimulateScenario::SignalReconnect).await?;
+
+    // Recovery must come via the full-reconnect path. `LocalTrackRepublished` is
+    // dispatched before `Reconnected` within the same restart task, so by the time
+    // we observe `Reconnected` we will already have flipped `saw_republish`.
+    let mut saw_republish = false;
+    let wait_recovered = async {
+        loop {
+            let Some(event) = events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            match event {
+                RoomEvent::Reconnecting => {
+                    log::info!("[{}] Reconnecting...", mode.name());
+                }
+                RoomEvent::LocalTrackRepublished { .. } => {
+                    log::info!("[{}] Track republished — escalated to full reconnect", mode.name());
+                    saw_republish = true;
+                }
+                RoomEvent::Reconnected => {
+                    log::info!("[{}] Reconnected", mode.name());
+                    return Ok(());
+                }
+                RoomEvent::Disconnected { reason } => {
+                    return Err(anyhow!("unexpected disconnect during recovery: {:?}", reason));
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Generous timeout: a forced resume failure ticks the reconnect interval
+    // (RECONNECT_INTERVAL = 5s) before the escalated full reconnect runs.
+    timeout(Duration::from_secs(40), wait_recovered)
+        .await
+        .context("Timeout waiting for full-reconnect recovery after forced resume failure")??;
+
+    assert!(
+        saw_republish,
+        "expected a full reconnect (LocalTrackRepublished) after the resume failure; \
+         recovery without escalation means the resume failure was not escalated"
+    );
+    assert_eq!(room_arc.connection_state(), ConnectionState::Connected);
+
+    let tracks_after = room_arc.local_participant().track_publications().len();
+    assert_eq!(
+        tracks_before, tracks_after,
+        "track should be restored after the escalated full reconnect"
+    );
+
+    log::info!("[{}] Test passed - resume failure escalated to full reconnect!", mode.name());
+    Ok(())
+}
+
+/// Verify the resume-failure escalation is *sticky across reconnect cycles*.
+///
+/// Reproduces the production migration loop: a transport failure (a server
+/// `Leave{Resume}` / PeerConnection `Failed`) arrives while a resume is in flight,
+/// the resume reports success anyway, and the follow-up resume cycle must escalate
+/// to a full reconnect rather than resuming again forever.
+///
+/// The concurrent failure is injected via fault injection during the FIRST resume —
+/// `fail_transport_during_next_resume` drives the exact same `reconnection_needed` path a
+/// real server `Leave{Resume}` takes — and the resume still succeeds as a plain
+/// resume (no republish). Post-fix, the SECOND resume cycle escalates to a full
+/// reconnect, observed via `LocalTrackRepublished` (only the full-reconnect path
+/// republishes). Pre-fix the pending escalation is dropped, the second cycle resumes
+/// again with no republish, and the final assertion fails.
+///
+/// The two cycles are driven by `SignalReconnect` rather than the `Migration`
+/// (server `Leave{Resume}`) scenario on purpose: a single-node `livekit-server
+/// --dev` has no node to migrate to, so a migration resume fails immediately and
+/// escalates on its own — which would mask the cross-cycle behavior under test.
+/// `SignalReconnect` resumes cleanly, keeping the pre-fix path on resume so the
+/// regression is observable.
+async fn test_resume_escalation_sticks_across_cycles_impl(mode: SignalingMode) -> Result<()> {
+    // Two participants: a lone publisher's resume can fail with a webrtc error on a
+    // `--dev` server, so we pair the publisher with a subscriber (as in the reconnect
+    // test) to keep the resume path healthy. The cross-cycle escalation needs cycle 1
+    // to succeed *as a resume*, so a reliable resume is essential.
+    let mut rooms = test_rooms_with_options([room_options(mode), room_options(mode)]).await?;
+    let (sub_room, mut sub_events) = rooms.pop().unwrap();
+    let (pub_room, mut events) = rooms.pop().unwrap();
+    let _sub_room = sub_room; // keep the subscriber alive for the duration of the test
+
+    let pub_room_arc = Arc::new(pub_room);
+
+    let sine_params =
+        SineParameters { freq: 440.0, amplitude: 1.0, sample_rate: 48000, num_channels: 1 };
+    let mut sine_track = SineTrack::new(pub_room_arc.clone(), sine_params);
+    sine_track.publish().await?;
+    assert_eq!(pub_room_arc.local_participant().track_publications().len(), 1);
+
+    // Wait for the subscriber to receive the track, ensuring the publisher PC is fully
+    // connected before we start tearing the signal connection down.
+    let wait_subscribed = async {
+        loop {
+            let Some(event) = sub_events.recv().await else {
+                return Err(anyhow!("Subscriber event channel closed"));
+            };
+            if let RoomEvent::TrackSubscribed { .. } = event {
+                return Ok(());
+            }
+        }
+    };
+    timeout(Duration::from_secs(15), wait_subscribed)
+        .await
+        .context("Timeout waiting for subscriber to receive the published track")??;
+
+    let room_arc = pub_room_arc;
+
+    // --- Cycle 1: a resume with a concurrent failure injected mid-resume. The resume
+    // must still succeed as a plain resume (no republish). ---
+    room_arc.fail_transport_during_next_resume();
+    log::info!("[{}] Cycle 1: resume + concurrent failure injected mid-resume", mode.name());
+    room_arc.simulate_scenario(SimulateScenario::SignalReconnect).await?;
+
+    let mut cycle1_republished = false;
+    let wait_cycle1 = async {
+        loop {
+            let Some(event) = events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            match event {
+                RoomEvent::LocalTrackRepublished { .. } => cycle1_republished = true,
+                RoomEvent::Reconnected => return Ok(()),
+                RoomEvent::Disconnected { reason } => {
+                    return Err(anyhow!("unexpected disconnect in cycle 1: {:?}", reason));
+                }
+                _ => {}
+            }
+        }
+    };
+    timeout(Duration::from_secs(40), wait_cycle1)
+        .await
+        .context("Timeout waiting for cycle 1 (resume) to recover")??;
+
+    // Premise check: cycle 1 must have been a resume, not a full reconnect. If the
+    // server's resume failed it would escalate here, voiding the cross-cycle test.
+    assert!(
+        !cycle1_republished,
+        "cycle 1 republished (full reconnect) — the resume did not complete as a resume, \
+         so the cross-cycle escalation premise does not hold"
+    );
+    assert_eq!(room_arc.connection_state(), ConnectionState::Connected);
+
+    // Let the reconnect cycle fully unwind (the `reconnecting` flag clears just after
+    // the Reconnected event) before triggering the next one.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Cycle 2: another server Leave{Resume}. The failure pending from cycle 1 must
+    // now escalate this cycle to a full reconnect. ---
+    log::info!("[{}] Cycle 2: resume — must escalate to full reconnect", mode.name());
+    room_arc.simulate_scenario(SimulateScenario::SignalReconnect).await?;
+
+    let mut cycle2_republished = false;
+    let wait_cycle2 = async {
+        loop {
+            let Some(event) = events.recv().await else {
+                return Err(anyhow!("Event channel closed"));
+            };
+            match event {
+                RoomEvent::LocalTrackRepublished { .. } => cycle2_republished = true,
+                RoomEvent::Reconnected => return Ok(()),
+                RoomEvent::Disconnected { reason } => {
+                    return Err(anyhow!("unexpected disconnect in cycle 2: {:?}", reason));
+                }
+                _ => {}
+            }
+        }
+    };
+    timeout(Duration::from_secs(40), wait_cycle2)
+        .await
+        .context("Timeout waiting for cycle 2 recovery")??;
+
+    assert!(
+        cycle2_republished,
+        "cycle 2 did not escalate to a full reconnect (no LocalTrackRepublished): the \
+         failure pending from cycle 1's resume was dropped instead of sticking — this is \
+         the pre-fix resume-loop bug"
+    );
+    assert_eq!(room_arc.connection_state(), ConnectionState::Connected);
+    assert_eq!(room_arc.local_participant().track_publications().len(), 1);
+
+    log::info!("[{}] Test passed - escalation persisted across resume cycles!", mode.name());
+    Ok(())
+}
+
+async fn test_publisher_offer_late_publish_impl(mode: SignalingMode) -> Result<()> {
+    let (url, api_key, api_secret) = get_env_for_mode(mode);
+    let room_name = format!("test_{:?}_pubofflate_{}", mode, create_random_uuid());
+
+    // 1. A joins first with auto_subscribe=true + single_pc.
+    //    Its initial offer pre-allocates 3+3 recvonly transceivers. The SFU
+    //    answers them all as empty `sendonly` slots (no msid, no ssrc) — the
+    //    exact shape that, without the blink-diff fix, would silently drop
+    //    incoming subscriptions later landed on those slots.
+    let a_opts = {
+        let mut o = room_options(mode);
+        o.room.auto_subscribe = true;
+        o
+    };
+    let a_token = create_token(&api_key, &api_secret, &room_name, "p_a")?;
+    let (a_room, mut a_events) = Room::connect(&url, &a_token, a_opts.room.clone()).await?;
+    log::info!("[pubofflate] A connected");
+    assert_signaling_mode_state(&a_room, mode, &url);
+
+    // Wait A is fully settled (initial SDP applied, pre-allocated
+    // empty slots negotiated) before B joins.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 2. B joins and publishes a track. The SFU forwards to A on one of A's
+    //    pre-allocated recvonly slots — populating msid on an EXISTING
+    //    client-side transceiver. Without the blink-diff fix libwebrtc would
+    //    not refire OnTrack for this and A would silently miss the
+    //    subscription.
+    let b_token = create_token(&api_key, &api_secret, &room_name, "p_b")?;
+    let (b_room, _b_events) = connect_room(&url, &b_token, mode).await?;
+    let b_room_arc = Arc::new(b_room);
+    let mut b_track = SineTrack::new(
+        b_room_arc.clone(),
+        SineParameters { freq: 440.0, amplitude: 1.0, sample_rate: 48000, num_channels: 1 },
+    );
+    b_track.publish().await?;
+    let b_sid = b_room_arc
+        .local_participant()
+        .track_publications()
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| anyhow!("B has no publication after publish"))?;
+    log::info!("[pubofflate] B published track {}", b_sid);
+
+    // 3. A must observe `TrackSubscribed` for B's track within 10s.
+    let wait = async {
+        loop {
+            let Some(event) = a_events.recv().await else {
+                return Err(anyhow!("event channel closed"));
+            };
+            if let RoomEvent::TrackSubscribed { publication, .. } = event {
+                if publication.sid() == b_sid {
+                    return Ok(());
+                }
+            }
+        }
+    };
+    timeout(Duration::from_secs(10), wait).await.context(format!(
+        "A never received TrackSubscribed for B's track {} — the blink-diff fix did not deliver",
+        b_sid
+    ))??;
+
+    log::info!("[pubofflate] A subscribed to {} via pre-allocated slot — fix works", b_sid);
     Ok(())
 }

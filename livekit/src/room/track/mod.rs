@@ -14,8 +14,8 @@
 
 use std::{fmt::Debug, sync::Arc};
 
+use libwebrtc::enum_dispatch;
 use libwebrtc::{prelude::*, stats::RtcStats};
-use livekit_protocol::enum_dispatch;
 use livekit_protocol::{self as proto};
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -76,6 +76,16 @@ pub enum VideoQuality {
     Low,
     Medium,
     High,
+}
+
+impl From<VideoQuality> for proto::VideoQuality {
+    fn from(quality: VideoQuality) -> Self {
+        match quality {
+            VideoQuality::Low => Self::Low,
+            VideoQuality::Medium => Self::Medium,
+            VideoQuality::High => Self::High,
+        }
+    }
 }
 
 macro_rules! track_dispatch {
