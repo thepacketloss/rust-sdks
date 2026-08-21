@@ -17,10 +17,7 @@ use bmrng::unbounded::UnboundedRequestReceiver;
 use futures_util::StreamExt;
 use libwebrtc::{
     native::frame_cryptor::EncryptionState,
-    prelude::{
-        ContinualGatheringPolicy, IceTransportsType, MediaStream, MediaStreamTrack,
-        RtcConfiguration,
-    },
+    prelude::{MediaStream, MediaStreamTrack, RtcConfiguration},
     rtp_transceiver::RtpTransceiver,
     RtcError,
 };
@@ -383,11 +380,15 @@ pub struct RpcAck {
 pub struct RoomSdkOptions {
     pub sdk: String,
     pub sdk_version: String,
+    /// Comma separated list of additional LiveKit SDKs layered on top of this one, with
+    /// versions, e.g. `"components-js:1.2.3,track-processors-js:1.2.3"`. Reported to the
+    /// server as `ClientInfo.other_sdks`. `None` when there are none.
+    pub other_sdks: Option<String>,
 }
 
 impl Default for RoomSdkOptions {
     fn default() -> Self {
-        Self { sdk: "rust".to_string(), sdk_version: SDK_VERSION.to_string() }
+        Self { sdk: "rust".to_string(), sdk_version: SDK_VERSION.to_string(), other_sdks: None }
     }
 }
 
@@ -396,6 +397,7 @@ impl From<RoomSdkOptions> for SignalSdkOptions {
         let mut sdk_options = SignalSdkOptions::default();
         sdk_options.sdk = options.sdk;
         sdk_options.sdk_version = Some(options.sdk_version);
+        sdk_options.other_sdks = options.other_sdks;
         sdk_options
     }
 }
@@ -462,13 +464,8 @@ impl Default for RoomOptions {
             e2ee: None,
             encryption: None,
 
-            // Explicitly set the default values
-            rtc_config: RtcConfiguration {
-                ice_servers: vec![], /* When empty, this will automatically be filled by the
-                                      * JoinResponse */
-                continual_gathering_policy: ContinualGatheringPolicy::GatherContinually,
-                ice_transport_type: IceTransportsType::All,
-            },
+            // Defaults; ice_servers is empty here and filled from the JoinResponse.
+            rtc_config: RtcConfiguration::default(),
             join_retries: 3,
             sdk_options: RoomSdkOptions::default(),
             single_peer_connection: true,
@@ -722,10 +719,7 @@ impl Room {
             dt::remote::Manager::new(remote_dt_options);
 
         let (incoming_stream_manager, incoming_data_stream_input, incoming_output) =
-            ds::incoming::Manager::new(
-                INTERNAL_DATA_STREAM_TOPICS.into(),
-                options.data_stream.max_payload_byte_length,
-            );
+            ds::incoming::Manager::new(options.data_stream.max_payload_byte_length);
         let (outgoing_stream_manager, packet_rx) = ds::outgoing::Manager::new();
 
         let room_info = join_response.room.unwrap();
@@ -2432,11 +2426,17 @@ async fn incoming_data_stream_task(
                         }
                     }
                 },
-                ds::incoming::OutputEvent::ChunkReceived(ds::incoming::ChunkReceived { chunk, participant_identity }) => {
-                    dispatcher.dispatch(&RoomEvent::StreamChunkReceived { chunk: chunk.into(), participant_identity: participant_identity.into() });
+                // Chunk/trailer packets carry no topic of their own, so the manager reports the
+                // topic of the stream they belong to for the internal check below.
+                ds::incoming::OutputEvent::ChunkReceived(ds::incoming::ChunkReceived { chunk, participant_identity, topic }) => {
+                    if !topic.as_deref().is_some_and(is_internal_topic) {
+                        dispatcher.dispatch(&RoomEvent::StreamChunkReceived { chunk: chunk.into(), participant_identity: participant_identity.into() });
+                    }
                 }
-                ds::incoming::OutputEvent::TrailerReceived(ds::incoming::TrailerReceived { trailer, participant_identity }) => {
-                    dispatcher.dispatch(&RoomEvent::StreamTrailerReceived { trailer: trailer.into(), participant_identity: participant_identity.into() });
+                ds::incoming::OutputEvent::TrailerReceived(ds::incoming::TrailerReceived { trailer, participant_identity, topic }) => {
+                    if !topic.as_deref().is_some_and(is_internal_topic) {
+                        dispatcher.dispatch(&RoomEvent::StreamTrailerReceived { trailer: trailer.into(), participant_identity: participant_identity.into() });
+                    }
                 }
             },
             _ = close_rx.recv() => {
@@ -2448,8 +2448,7 @@ async fn incoming_data_stream_task(
 }
 
 /// Data stream topics reserved for internal SDK use (e.g. RPC). Events for these topics are
-/// handled within the `livekit` crate and never surfaced through `RoomEvent`; the list is also
-/// passed to `IncomingStreamManager` so it can flag internal streams.
+/// handled within the `livekit` crate and never surfaced through `RoomEvent`.
 const INTERNAL_DATA_STREAM_TOPICS: &[&str] = &[rpc::RPC_REQUEST_TOPIC, rpc::RPC_RESPONSE_TOPIC];
 
 fn is_internal_topic(topic: &str) -> bool {
