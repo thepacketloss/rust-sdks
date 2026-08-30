@@ -21,9 +21,6 @@ use libwebrtc::{
     rtp_transceiver::RtpTransceiver,
     RtcError,
 };
-use livekit_api::signal_client::{
-    SignalOptions, SignalSdkOptions, CLIENT_PROTOCOL_DEFAULT, SIGNAL_CONNECT_TIMEOUT,
-};
 use livekit_data_stream::backend as ds;
 use livekit_datatrack::{
     api::{DataTrackSid, RemoteDataTrack},
@@ -31,6 +28,9 @@ use livekit_datatrack::{
 };
 use livekit_protocol as proto;
 use livekit_runtime::JoinHandle;
+use livekit_signaling::{
+    SignalOptions, SignalSdkOptions, CLIENT_PROTOCOL_DEFAULT, SIGNAL_CONNECT_TIMEOUT,
+};
 use parking_lot::RwLock;
 pub use proto::DisconnectReason;
 use proto::SignalTarget;
@@ -898,6 +898,14 @@ impl Room {
     #[cfg(feature = "__lk-e2e-test")]
     pub fn drop_disconnected_updates(&self, enabled: bool) {
         self.inner.rtc_engine.drop_disconnected_updates(enabled);
+    }
+
+    /// Test-only: the publisher transport's current connection state. Lets a test assert
+    /// that teardown really closed the transport, rather than inferring it from room-level
+    /// state that can reach `Disconnected` while the transport is still open.
+    #[cfg(feature = "__lk-e2e-test")]
+    pub fn publisher_connection_state(&self) -> libwebrtc::prelude::PeerConnectionState {
+        self.inner.rtc_engine.session().publisher_connection_state()
     }
 
     pub async fn get_stats(&self) -> EngineResult<SessionStats> {
